@@ -15,6 +15,24 @@ Heads up, this is experimental. Writing to a radio can mis-program it, so always
 do a Download first and keep that `.img` as a backup before you upload anything.
 No warranty, use at your own risk.
 
+## Easy install (recommended)
+
+Download **`RT950-Setup.exe`** from the
+[latest release](https://github.com/nivingoonesekera/Chirp_BLE_Radtel-RT-950-Pro/releases)
+and run it. It installs everything for you in one go:
+
+* Python 3.10 (with the `py` launcher),
+* the `bleak` + `pyserial` packages,
+* com0com and a ready-made COM10 ↔ COM11 virtual pair (for the bridge path),
+* the drivers, the bridge, and the GUI — with a Start-menu/desktop **RT-950 Pro
+  Bridge** shortcut.
+
+It needs admin (com0com installs a driver) and an internet connection during
+install. The only thing it does *not* install is CHIRP itself — grab that from
+<https://chirpmyradio.com/> and turn on `Help > Enable Developer Functions`.
+
+Prefer to set it up by hand, or not on Windows? Follow the manual steps below.
+
 ## Two ways to use it
 
 Most people should use the direct Bluetooth driver:

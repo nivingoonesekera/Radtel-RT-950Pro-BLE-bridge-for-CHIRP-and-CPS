@@ -1,3 +1,6 @@
 # Python
 __pycache__/
 *.py[cod]
+
+# Installer build artifact — ship via a GitHub Release, don't commit the binary
+/RT950-Setup.exe
