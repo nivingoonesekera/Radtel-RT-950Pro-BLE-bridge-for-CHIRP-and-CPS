@@ -62,10 +62,12 @@ Tips:
 * If `bleak` is not found automatically, point at it:
   `set RT950_BLEAK_SITE=C:\Path\To\Python310\Lib\site-packages`
 
-## Bridge with com0com
+## Bridge with com0com (CHIRP *and* the Radtel CPS)
 
-Use this if the direct way will not run on your PC, or you want the bridge's
-live frame log.
+Use this if the direct way will not run on your PC, you want the bridge's live
+frame log, or you want to use the **official Radtel BT-RT950PRO CPS** software
+over Bluetooth. The bridge makes BLE look like a plain USB cable, so any COM-port
+app — CHIRP or the CPS — works through it unchanged.
 
 One time:
 
@@ -73,15 +75,27 @@ One time:
    for example COM10 and COM11.
 2. `pip install bleak pyserial`.
 
-Each time:
+The easy way — GUI:
+
+1. Run `python bridge_gui.py`. It scans for your radio (with a signal meter),
+   lists COM ports, and has Start/Stop buttons — no flags to type.
+2. Pick your radio and the bridge's COM port (e.g. COM10), press **Start Bridge**.
+3. Point CHIRP or the CPS at the *other* side of the pair (COM11), then
+   Download/Upload as usual.
+
+The command-line way:
 
 1. Start the bridge and leave it running (use your radio's MAC):
-   `python ble_bridge.py COM10 AA:BB:CC:DD:EE:FF`
+   `python ble_bridge.py COM10 --addr AA:BB:CC:DD:EE:FF`
    Wait for `unlock sent; bridge live`.
-2. In CHIRP (developer mode), `Load Module > radtel_rt950pro_BL.py`.
+2. In CHIRP (developer mode) `Load Module > radtel_rt950pro_BL.py`, or open the
+   CPS.
 3. Download or Upload, model Radtel RT-950 Pro, port COM11 (the other side of
    the pair).
-4. Press Ctrl+C in the bridge window when you are done.
+4. Press Ctrl+C in the bridge window (or Stop in the GUI) when you are done.
+
+Note: boot-logo upload is **not** supported over Bluetooth — use the USB cable
+for that.
 
 ## If something goes wrong
 

@@ -1,44 +1,70 @@
-"""BLE <-> serial bridge for the Radtel RT-950 Pro (replaces ble-serial).
+"""BLE <-> serial bridge that lets the official Radtel BT-RT950PRO CPS talk to
+the radio over Bluetooth as if it were the USB programming cable.
 
-Why this exists instead of ble-serial:
-The radio refuses all clone traffic on ffe1 until it receives a one-time
-"unlock" write on a *second* characteristic, ff31 (captured in gattattack.txt).
-ble-serial can only drive a single write characteristic, so it can never both
-unlock (ff31) and carry data (ffe1).  This bridge does the unlock once at
-connect, then transparently pipes ffe1 <-> a serial port.
+Goal:
+The CPS .exe speaks a plain UART protocol (115200 8N1: the "PROGRAMBT9000U"
+handshake, then R/T reads and W/X writes of the EEPROM, with XOR encryption —
+see BT-RT950PRO_CPS.exe_Decompiled/KDH/RWDataOperation.cs). Over the USB cable
+that UART is transparent. This bridge makes BLE look identical: it does ONLY the
+BLE connection + one-time unlock, then pipes bytes verbatim between a virtual COM
+port and the radio's ffe1 characteristic. The CPS drives the entire protocol;
+the bridge never parses, reorders, or answers it — it is a dumb cable.
 
-The unlock challenge is replayed verbatim from the capture; the radio's response
-is deterministic and a replay is accepted (verified with ble_probe.py unlock),
-so no live challenge computation is needed.
+Why a custom bridge (not ble-serial):
+The radio refuses all traffic on ffe1 until it receives a one-time "unlock" write
+on a *second* characteristic, ff31 (captured in gattattack.txt). ble-serial can
+only drive a single write characteristic, so it can never both unlock (ff31) and
+carry data (ffe1). This bridge does the unlock once at connect, then transparently
+pipes ffe1 <-> the serial port. The unlock challenge is replayed verbatim from the
+capture; the radio's response is deterministic and a replay is accepted, so no
+live challenge computation is needed.
 
-The radio drops the BLE link right after it commits the APRS write block (0x58)
-to flash. That happens after the block is acknowledged, so the clone is already
-complete; the bridge detects the disconnect, logs it with a timestamp, and
-reconnects + re-unlocks so the next CHIRP attempt works without restarting.
+The radio occasionally drops the BLE link mid-session (observed right after the
+APRS write block, most likely a flash-commit stall tripping the supervision
+timeout). The bridge detects the disconnect, logs it with a timestamp, and
+automatically reconnects + re-unlocks so the next CPS Read/Write just works
+without restarting anything.
 
-Topology (unchanged from before):
-    radio  <--BLE-->  ble_bridge.py  <--COM10|COM11(com0com)-->  CHIRP
+Topology:
+    radio  <--BLE-->  ble_bridge.py  <--COM10 | COM11 (com0com)-->  CPS .exe
+
+Set up a com0com virtual null-modem pair (e.g. COM10<->COM11). Run this bridge on
+one side (COM10) and point the CPS port-select dialog at the other side (COM11).
+Both ends are 115200 8N1.
+
+Note on timing: each CPS read/write block is 132 bytes and CPS retries a block if
+it doesn't complete within ~1 s (the 1000 ms timer in RWDataOperation). Over BLE
+each 132-byte block arrives as ~7 notifications spaced one connection interval
+apart, so a very slow interval can trip that timeout. The default interval is the
+slow/reliable one; if CPS reports timeouts on reads, try --fast (but see the APRS
+caveat below).
 
 Usage:
-    python ble_bridge.py COM10 AA:BB:CC:DD:EE:FF      # COM port + radio MAC
-    python ble_bridge.py COM10 AA:BB:CC:DD:EE:FF -v   # verbose: every frame as hex
-    python ble_bridge.py COM10 AA:BB:CC:DD:EE:FF --fast
+    python ble_bridge.py             # defaults: COM10, slow/reliable interval
+    python ble_bridge.py COM10       # pick the COM port the bridge opens
+    python ble_bridge.py COM10 -v    # verbose: print every frame in/out as hex
+    python ble_bridge.py COM10 --fast
                                      # opt into the throughput-optimized 7.5 ms
                                      # interval: faster reads, but known to
-                                     # corrupt/drop the APRS 0x58 block. Default
+                                     # corrupt/drop the APRS write block. Default
                                      # (no flag) is the slow, reliable interval.
-
-    The MAC can also be set once via the RT950_BLE_ADDR environment variable.
+    python ble_bridge.py COM10 --no-unlock
+                                     # skip the ff31 unlock (experiments only;
+                                     # the radio needs it, so the handshake will
+                                     # fail without it). Unlock is ON by default.
+    python ble_bridge.py COM10 --rsp / --norsp
+                                     # force ffe1 write WITH / WITHOUT response
+                                     # (default: auto from the characteristic's
+                                     # advertised properties)
 
 Output is line-buffered, so you see [bridge] lines live in your terminal as
 they happen (no need for `python -u`).
 
 Copyright (c) 2026 Nivin Goonesekera - VK3NWG. MIT License (see LICENSE).
-Part of the Radtel RT-950 Pro BLE CHIRP driver project.
+Part of the Radtel BT-RT950PRO BLE bridge project.
 """
 
 import asyncio
-import os
 import sys
 import time
 
@@ -57,65 +83,94 @@ VERBOSE = "-v" in ARGS or "--verbose" in ARGS
 # interval is slow (100-200 ms, per its 0x2a04 value). Requesting Windows'
 # "throughput-optimized" 7.5 ms interval speeds up reads a lot, BUT the module
 # can't hold that pace through the APRS flash commit and the link corrupts/drops
-# on the final 0x58 block. The slow interval is the reliable one, so DEFAULT IS
-# SLOW (reliable); pass --fast to opt into the throughput-optimized interval.
+# on the final APRS block. ble-serial never requested fast params -> slow but
+# reliable, which is the behavior the developer saw working. So DEFAULT IS SLOW
+# (reliable); pass --fast to opt into the throughput-optimized interval.
 FAST = "--fast" in ARGS
-# Adaptive write pacing (the speed knob).
-#
-# Two ways to push a 132-byte block over ffe1:
-#   * write-WITHOUT-response: blast the ~7 chunks back to back, no per-chunk
-#     ATT round-trip. Fast (block time collapses from ~1.3 s to a few hundred
-#     ms) but no backpressure.
-#   * write-WITH-response: wait for each chunk's ATT confirmation before the
-#     next, like the USB cable's flow control. Slow but lets the radio's small
-#     UART buffer drain to the MCU — needed through a flash commit.
-#
-# DEFAULT IS ADAPTIVE: bulk channel/settings blocks go write-without-response
-# (fast), and ONLY the APRS frame (the flash commit) is sent write-with-response
-# (gentle). Overrides:
-#   --rsp    force write-WITH-response for every frame (old reliable behavior;
-#            use this if bulk write-without-response proves flaky on your link)
-#   --norsp  force write-WITHOUT-response for every frame (fastest, incl. APRS)
+# ff31 "unlock" write (captured from the mobile BLE app, replayed once at connect).
+# This is REQUIRED and ON by default: the radio's BLE module will not carry the
+# CPS protocol — not even the PROGRAMBT9000U handshake — until it receives this
+# write on ff31. (Proven empirically: with --no-unlock the handshake fails. The
+# CPS itself cannot do it: it is a serial/COM app with no BLE awareness, so it
+# can't write a GATT characteristic.) --no-unlock is left only for experiments.
+DO_UNLOCK = "--no-unlock" not in ARGS
+# Write type for ffe1. A BLE characteristic advertises which write types it
+# supports ("write" = with-response, "write-without-response"). By DEFAULT the
+# bridge auto-picks from those advertised properties (preferring with-response
+# for flow control when available). Force it only for diagnostics:
+#   --rsp    force write-WITH-response
+#   --norsp  force write-WITHOUT-response
 FORCE_RSP = "--rsp" in ARGS
 FORCE_NORSP = "--norsp" in ARGS
+# Set by bridge_gui.py when it launches us. Only affects wording: the GUI has
+# Start/Stop buttons, so the terminal-only "Ctrl+C to stop" hints are suppressed
+# and the "live" line becomes a simple "ready" message.
+IS_GUI = "--gui" in ARGS
+def _arg_value(name, default):
+    """Read `--name VALUE` (or `--name=VALUE`) from ARGS, else return default."""
+    for i, a in enumerate(ARGS):
+        if a == name and i + 1 < len(ARGS):
+            return ARGS[i + 1]
+        if a.startswith(name + "="):
+            return a.split("=", 1)[1]
+    return default
 
 
-def _looks_like_mac(s: str) -> bool:
-    return s.count(":") == 5
+# BLE MAC of the radio. Defaults to the original hardcoded unit so existing
+# command lines keep working; the GUI passes --addr from its scan list.
+ADDR = _arg_value("--addr", "E4:66:E5:78:28:3C")
 
-
-# Positional args: the COM port (e.g. COM10) and the radio's BLE MAC. The MAC
-# can also come from the RT950_BLE_ADDR environment variable. Order between the
-# two positionals doesn't matter — the one with colons is the MAC.
-_positional = [a for a in ARGS if not a.startswith("-")]
-PORT = next((a for a in _positional if not _looks_like_mac(a)), "COM10")
-ADDR = os.environ.get("RT950_BLE_ADDR") or next(
-    (a for a in _positional if _looks_like_mac(a)), None
+# The COM port is the first bare (non-flag) argument. Skip the value that
+# follows a "--addr" so the MAC isn't mistaken for the port.
+_skip = set()
+for _i, _a in enumerate(ARGS):
+    if _a == "--addr" and _i + 1 < len(ARGS):
+        _skip.add(_i + 1)
+PORT = next(
+    (a for i, a in enumerate(ARGS) if not a.startswith("-") and i not in _skip),
+    "COM10",
 )
-if not ADDR:
-    sys.exit(
-        "[bridge] No radio BLE address given.\n"
-        "  Pass it as an argument or set RT950_BLE_ADDR, e.g.:\n"
-        "      python ble_bridge.py COM10 AA:BB:CC:DD:EE:FF\n"
-        "      set RT950_BLE_ADDR=AA:BB:CC:DD:EE:FF  (then: python ble_bridge.py COM10)\n"
-        "  Find the MAC with any BLE scanner app, or just use the no-bridge\n"
-        "  driver radtel_rt950pro_BLE_int.py, which scans and lets you pick the radio."
-    )
 
 # Command byte of the APRS *write* frame, used to recognise the flash-commit
-# block on the wire so the bridge can pace it gently. Keep this in sync with the
-# APRS CloneSegment.write_command in radtel_rt950pro_BL.py.
-APRS_WRITE_CMD = 0x58  # confirmed by aprs_probe.py (0x55 was a wrong USB guess)
+# block on the wire so the bridge can pace it gently. This is the 'X' (0x58)
+# command the CPS sends for the APRS region: see WriteRadioData() in
+# BT-RT950PRO_CPS.exe_Decompiled/KDH/RWDataOperation.cs, where after the main
+# EEPROM it sets the command byte to 88 (0x58) and writes addr 0, len 0x80. The
+# 4-byte header is plaintext on the wire (XOR encryption only covers the 128
+# payload bytes that follow), so this marker is reliable. Keep it in sync if the
+# CPS ever changes which command commits APRS.
+APRS_WRITE_CMD = 0x58
 APRS_MARKER = bytes((APRS_WRITE_CMD, 0x00, 0x00, 0x80))
 
+# Boot-image (start-up logo) import uses a different, 0xA5-framed protocol
+# (KDH/ImportBmpOperation.cs): every packet is <A5> <cmd> <id16> <len16> ... <crc16>
+# and the radio replies with frames that also start with 0xA5. We only *log* these
+# (never alter them) so a failed import shows exactly how far it got. 0xA5 = the
+# Fram_Header in COMMAND_TYPE.cs; cmd 0x02 = Handshake.
+BOOT_FRAME_HEADER = 0xA5
+BOOT_HANDSHAKE_MARKER = bytes((BOOT_FRAME_HEADER, 0x02))
 
-def _write_mode_for(is_aprs: bool) -> bool:
-    """Return response= for write_gatt_char, honoring the adaptive policy."""
+# Resolved at connect time from the ffe1 characteristic's advertised properties
+# (overridable by --rsp / --norsp). True = write-with-response.
+WRITE_WITH_RESPONSE = True
+
+
+def _resolve_write_mode(char) -> bool:
+    """Decide the ffe1 write type from its GATT properties (+ CLI overrides)."""
     if FORCE_RSP:
         return True
     if FORCE_NORSP:
         return False
-    return is_aprs  # default: gentle (with response) only for the APRS frame
+    props = list(getattr(char, "properties", []) or [])
+    has_rsp = "write" in props
+    has_norsp = "write-without-response" in props
+    print(f"[bridge] ffe1 properties: {props}")
+    if has_rsp:
+        return True          # prefer flow control when the radio offers it
+    if has_norsp:
+        return False         # module is write-without-response only
+    # Nothing advertised (some stacks under-report); default to with-response.
+    return True
 
 NOTIFY_UUID = "0000ffe1-0000-1000-8000-00805f9b34fb"  # notify IN  (radio -> PC)
 DATA_UUID   = "0000ffe1-0000-1000-8000-00805f9b34fb"  # write OUT  (PC -> radio)
@@ -136,12 +191,12 @@ def _ts() -> str:
 def _request_fast_connection(client):
     """Ask Windows for the fastest BLE connection interval (the Android trick).
 
-    Each 132-byte clone block is delivered as ~7 notifications (MTU is pinned at
+    Each 132-byte block is delivered as ~7 notifications (MTU is pinned at
     23 by the radio), and the gap between notifications is the connection
     interval. Windows' default interval is slow/power-saving; requesting
-    ThroughputOptimized drops it toward 7.5 ms (the same thing Android does),
-    which is the biggest single read-speed gain. Best effort: if the API isn't
-    available we keep the default interval.
+    ThroughputOptimized drops it toward 7.5 ms, the same thing Android does,
+    which is the single biggest read-speed win available to us. Best-effort:
+    if the API isn't available we just keep the default interval.
     """
     global _conn_param_request
     try:
@@ -170,35 +225,46 @@ async def connect_and_unlock(ser, stats, disconnected: asyncio.Event):
     def on_disconnect(_client):
         t0 = stats.get("aprs_t0")
         extra = f" ({time.monotonic() - t0:.2f}s after APRS block sent)" if t0 else ""
-        print(f"[bridge] !!! {_ts()} radio dropped the BLE connection{extra}")
+        print(f"[bridge] !!! {_ts()} device dropped the BLE connection{extra}")
         disconnected.set()
 
     def on_notify(_char, data: bytearray):
-        # Swallow the unlock response (always starts with 0x21 "!"): it is the
-        # radio answering the ff31 challenge and is NOT part of the clone
-        # stream. Forwarding it would leave a stale 0x21 in the serial buffer
-        # and break CHIRP's first handshake. Only do this until CHIRP has sent
-        # its first byte: after that, a notify chunk that happens to begin
-        # with 0x21 is legitimate clone data and must pass through.
-        if data and data[0] == 0x21 and stats["tx"] == 0:
+        # Only relevant with --unlock: swallow the ff31 unlock reply (starts with
+        # 0x21 "!") exactly once, before the CPS sends anything, so it can't land
+        # in the CPS's first handshake read. Without --unlock the radio never
+        # sends it, so the bridge swallows nothing and is a pure pipe.
+        if (DO_UNLOCK and not stats["unlock_swallowed"] and stats["tx"] == 0
+                and data and data[0] == 0x21):
+            stats["unlock_swallowed"] = True
             if VERBOSE:
-                print(f"  radio->  (unlock reply, swallowed) {bytes(data).hex().upper()}")
+                print(f"  device->  (unlock reply, swallowed) {bytes(data).hex().upper()}")
             return
         stats["rx"] += len(data)
         stats["notifies"] += 1
-        # After the APRS (0x58) block goes out, log every byte the radio sends
-        # back, with timing, so its ACK (or a drop) is visible in the trace.
+        # After the APRS write block goes out, spotlight EVERY byte the radio
+        # sends back, with timing, so we can see whether it NAKs, ACKs, or just
+        # goes silent before the link drops.
         t0 = stats.get("aprs_t0")
         if t0 is not None:
-            print(f"  [APRS] {_ts()} radio->PC +{time.monotonic() - t0:.3f}s "
+            print(f"  [APRS] {_ts()} device->PC +{time.monotonic() - t0:.3f}s "
                   f"[{len(data):3}] {bytes(data).hex().upper()}")
+        elif data and data[0] == BOOT_FRAME_HEADER:
+            # Bootloader is alive and answering over BLE — proves the 'D' jump
+            # did NOT kill the link. Log every reply so we can see how far the
+            # import gets before any timeout/drop.
+            print(f"  [BOOT] {_ts()} device->PC reply [{len(data):3}] "
+                  f"{bytes(data).hex().upper()}")
         elif VERBOSE:
-            print(f"  radio->PC [{len(data):3}] {bytes(data).hex().upper()}")
-        # radio -> PC: hand straight to the serial port for CHIRP to read
+            print(f"  device->PC [{len(data):3}] {bytes(data).hex().upper()}")
+        # radio -> PC: hand straight to the serial port for the CPS to read
         try:
             ser.write(bytes(data))
-        except serial.SerialTimeoutException:
-            # CHIRP isn't draining COM11 yet; drop rather than stall the loop.
+        except serial.SerialException:
+            # Either the CPS isn't draining its port yet, or it has briefly
+            # CLOSED its end (the boot-image import closes+reopens the port for
+            # 1 s mid-session). Drop this chunk rather than crash the notify
+            # callback or stall the BLE loop; the link must stay up across that
+            # close so the radio doesn't get orphaned in programming mode.
             pass
 
     for attempt in range(1, 6):
@@ -212,54 +278,87 @@ async def connect_and_unlock(ser, stats, disconnected: asyncio.Event):
             continue
         notify_ch = client.services.get_characteristic(NOTIFY_UUID)
         unlock_ch = client.services.get_characteristic(UNLOCK_UUID)
-        if notify_ch is not None and unlock_ch is not None:
-            print(f"[bridge] connected (mtu={client.mtu_size}); ffe1+ff31 present")
+        # ffe1 is mandatory (data + notify); ff31 is only needed for --unlock.
+        if notify_ch is not None and (unlock_ch is not None or not DO_UNLOCK):
+            print(f"[bridge] connected (mtu={client.mtu_size}); ffe1 present"
+                  f"{' + ff31' if unlock_ch is not None else ''}")
             break
-        print("[bridge] GATT table incomplete (ffe1/ff31 missing), reconnecting ...")
+        print("[bridge] GATT table incomplete (ffe1 missing), reconnecting ...")
         await client.disconnect()
         await asyncio.sleep(1.0)
     else:
         raise SystemExit("[bridge] could not get a complete GATT table after 5 tries")
 
+    # Pick the ffe1 write type from what the characteristic actually advertises.
+    global WRITE_WITH_RESPONSE
+    WRITE_WITH_RESPONSE = _resolve_write_mode(notify_ch)
+    print(f"[bridge] ffe1 write mode: {'WITH' if WRITE_WITH_RESPONSE else 'WITHOUT'} response")
+
     if FAST:
         print("[bridge] --fast: requesting throughput-optimized interval "
-              "(faster reads, but known to corrupt the APRS 0x58 block)")
+              "(faster reads, but known to corrupt the APRS write block)")
         _request_fast_connection(client)
     else:
-        print("[bridge] using the radio's default (slow) connection interval "
+        print("[bridge] using the device's default (slow) connection interval "
               "for reliability — like ble-serial")
     await client.start_notify(notify_ch, on_notify)
 
-    print(f"[bridge] sending unlock on ff31 ...")
-    await client.write_gatt_char(UNLOCK_UUID, UNLOCK, response=True)
-    await asyncio.sleep(0.4)
-    print(f"[bridge] {_ts()} unlock sent; bridge live. Run the clone in CHIRP. Ctrl+C to stop.")
+    if DO_UNLOCK and unlock_ch is not None:
+        print("[bridge] --unlock: sending one-time ff31 unlock ...")
+        await client.write_gatt_char(UNLOCK_UUID, UNLOCK, response=True)
+        await asyncio.sleep(0.4)
+    else:
+        print("[bridge] !!! --no-unlock: skipping ff31 unlock — the handshake "
+              "will almost certainly fail; this is for experiments only")
+    if IS_GUI:
+        print(f"[bridge] {_ts()} bridge live and ready.")
+    else:
+        print(f"[bridge] {_ts()} bridge live. Start Read/Write in the CPS or CHIRP. Ctrl+C to stop.")
     return client, notify_ch
 
 
 async def pipe(client, ser, stats, disconnected: asyncio.Event):
-    """Pump CHIRP's serial bytes to the radio until the link drops."""
+    """Pump the CPS's serial bytes to the radio until the link drops."""
     chunk = max(20, client.mtu_size - 3)
     loop = asyncio.get_event_loop()
     last_report = time.monotonic()
+    def _safe_read():
+        # The boot-image import closes its end of the com0com pair for ~1 s
+        # mid-session; reading our end can raise instead of just returning empty.
+        # Treat that as "no data" so we keep the BLE link up across the gap
+        # rather than tearing it down (which would orphan the radio in its
+        # bootloader/programming mode).
+        try:
+            return ser.read(256)
+        except serial.SerialException:
+            return b""
+
     while not disconnected.is_set():
-        # PC -> radio: drain whatever CHIRP wrote to the serial port
-        data = await loop.run_in_executor(None, ser.read, 256)
+        # PC -> radio: drain whatever the CPS wrote to the serial port
+        data = await loop.run_in_executor(None, _safe_read)
         if data:
             stats["tx"] += len(data)
-            # Spotlight the APRS write: CHIRP sends the block as header
-            # <cmd> 00 00 80 + 128 bytes. Mark the moment it goes on the air so
-            # we can time the radio's reply (or its silence + drop) against it,
-            # and pace this one frame gently regardless of the bulk write mode.
+            # Spotlight the APRS write: the CPS sends the block as header
+            # <cmd> 00 00 80 + 128 bytes. This is the flash-commit frame the
+            # radio is most likely to drop the BLE link on, so mark the moment
+            # it goes on the air (logging only — every frame is paced the same
+            # now) to time the radio's reply or its silence + drop against it.
             is_aprs = APRS_MARKER in data
-            response = _write_mode_for(is_aprs)
+            response = WRITE_WITH_RESPONSE
+            if data[0] == BOOT_FRAME_HEADER or BOOT_HANDSHAKE_MARKER in data:
+                # Boot-image import frame. cmd byte (2=handshake, 3=set-addr,
+                # 4=erase, 87=write-data, 6=over) is right after the 0xA5.
+                cmd = data[1] if len(data) > 1 else 0
+                print(f"\n[bridge] === {_ts()} BOOT-IMAGE frame -> device "
+                      f"(cmd=0x{cmd:02X}, {len(data)} bytes, "
+                      f"{(len(data)+chunk-1)//chunk} chunks) ===")
             if is_aprs:
                 stats["aprs_t0"] = time.monotonic()
-                print(f"\n[bridge] === {_ts()} APRS block (0x{APRS_WRITE_CMD:02X}) -> radio, "
+                print(f"\n[bridge] === {_ts()} APRS block (0x{APRS_WRITE_CMD:02X}) -> device, "
                       f"{len(data)} bytes in {(len(data)+chunk-1)//chunk} chunks "
                       f"(write {'WITH' if response else 'WITHOUT'} response) ===")
             if VERBOSE and not is_aprs:
-                print(f"  PC->radio [{len(data):3}] {bytes(data).hex().upper()}")
+                print(f"  PC->device [{len(data):3}] {bytes(data).hex().upper()}")
             try:
                 for i in range(0, len(data), chunk):
                     await client.write_gatt_char(
@@ -273,7 +372,7 @@ async def pipe(client, ser, stats, disconnected: asyncio.Event):
                 where = f" (APRS chunk, +{time.monotonic()-t0:.3f}s)" if t0 else ""
                 print(
                     f"[bridge] !!! {_ts()} GATT write failed mid-frame{where} "
-                    f"({exc}); {len(data)} byte(s) from CHIRP lost"
+                    f"({exc}); {len(data)} byte(s) from the CPS lost"
                 )
                 disconnected.set()
                 break
@@ -283,8 +382,8 @@ async def pipe(client, ser, stats, disconnected: asyncio.Event):
         now = time.monotonic()
         if now - last_report >= 1.0 and (stats["rx"] or stats["tx"]):
             print(
-                f"[bridge] live: radio->PC {stats['rx']} B in {stats['notifies']} pkts, "
-                f"PC->radio {stats['tx']} B"
+                f"[bridge] live: device->PC {stats['rx']} B in {stats['notifies']} pkts, "
+                f"PC->device {stats['tx']} B"
             )
             last_report = now
 
@@ -292,17 +391,15 @@ async def pipe(client, ser, stats, disconnected: asyncio.Event):
 async def main():
     ser = serial.Serial(PORT, baudrate=115200, timeout=0, write_timeout=2.0)
     print(f"[bridge] opened {PORT}")
-    if FORCE_RSP:
-        mode = "WITH response for every frame (paced/reliable)"
-    elif FORCE_NORSP:
-        mode = "WITHOUT response for every frame (fastest)"
-    else:
-        mode = (f"adaptive — bulk WITHOUT response (fast), APRS frame "
-                f"(0x{APRS_WRITE_CMD:02X}) WITH response (gentle)")
-    print(f"[bridge] ffe1 write mode: {mode}")
+    forced = "rsp" if FORCE_RSP else ("norsp" if FORCE_NORSP else "auto")
+    print(f"[bridge] unlock={'on' if DO_UNLOCK else 'off'}, "
+          f"write-mode={forced}, interval={'fast' if FAST else 'slow'}")
 
     while True:
-        stats = {"rx": 0, "tx": 0, "notifies": 0}
+        # Fresh per BLE session: unlock_swallowed gates the one-shot drop of the
+        # ff31 unlock reply, and is reset here so a re-unlock after a reconnect
+        # is swallowed again before the CPS's next handshake.
+        stats = {"rx": 0, "tx": 0, "notifies": 0, "unlock_swallowed": False}
         disconnected = asyncio.Event()
         client = None
         try:
@@ -321,14 +418,15 @@ async def main():
                 except Exception:
                     pass
         # Radio-side drop: flush whatever half-frame is stuck in the serial
-        # buffers (the clone attempt is dead anyway) and bring the link back
-        # so the user's next CHIRP attempt just works.
+        # buffers (the in-flight operation is dead anyway) and bring the link
+        # back so the user's next CPS Read/Write just works.
         try:
             ser.reset_input_buffer()
             ser.reset_output_buffer()
         except Exception:
             pass
-        print(f"[bridge] {_ts()} link lost; reconnecting in 2 s (Ctrl+C to stop) ...")
+        hint = "" if IS_GUI else " (Ctrl+C to stop)"
+        print(f"[bridge] {_ts()} link lost; reconnecting in 2 s{hint} ...")
         await asyncio.sleep(2.0)
 
     ser.close()
