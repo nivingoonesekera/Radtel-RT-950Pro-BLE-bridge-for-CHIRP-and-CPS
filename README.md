@@ -6,6 +6,8 @@
 
 A [CHIRP](https://chirpmyradio.com/) driver that reads and writes the Radtel
 RT-950 Pro over Bluetooth, so you can program the radio without a USB cable.
+It also ships a Bluetooth bridge (and a one-click GUI / installer) so the
+**official Radtel BT-RT950PRO CPS** can program the radio over Bluetooth too.
 
 I wrote the Bluetooth side of this. It builds on the USB-cable driver by Nathan
 Barguss (2E0NBS) for the radio's memory format:
@@ -27,23 +29,38 @@ and run it. It installs everything for you in one go:
 * the drivers, the bridge, and the GUI — with a Start-menu/desktop **RT-950 Pro
   Bridge** shortcut.
 
+The **RT-950 Pro Bridge** GUI it installs works with **both CHIRP and the
+official Radtel BT-RT950PRO CPS**: start the bridge, then point either program at
+the bridge's COM port. (If you only ever use the CPS, this `.exe`/GUI is the path
+to use — the direct CHIRP driver below is a CHIRP module the CPS can't load.)
+
 It needs admin (com0com installs a driver) and an internet connection during
 install. The only thing it does *not* install is CHIRP itself — grab that from
 <https://chirpmyradio.com/> and turn on `Help > Enable Developer Functions`.
+(The CPS is a separate download from Radtel.)
 
 Prefer to set it up by hand, or not on Windows? Follow the manual steps below.
 
 ## Two ways to use it
 
-Most people should use the direct Bluetooth driver:
+Which one you can use depends on the software:
+
+* **CHIRP** — either way below works.
+* **Official Radtel CPS** — you must use the **bridge** (or the GUI / the
+  `.exe`). The direct driver is a CHIRP module, so the CPS can't load it.
+
+Most people on CHIRP should use the direct Bluetooth driver:
 
 * **`radtel_rt950pro_BLE_int.py`** connects straight to the radio over Bluetooth
   and lets you pick it from a list. Needs Python 3.10 and `bleak`, nothing else.
+  **CHIRP only.**
 
-If you would rather use a bridge, or want to watch the live Bluetooth traffic:
+If you would rather use a bridge, want to watch the live Bluetooth traffic, or
+want to run the **official Radtel CPS**:
 
-* **`radtel_rt950pro_BL.py`** plus **`ble_bridge.py`** needs Python 3.10,
-  `bleak`, `pyserial` and com0com.
+* **`radtel_rt950pro_BL.py`** plus **`ble_bridge.py`** (or `bridge_gui.py`) needs
+  Python 3.10, `bleak`, `pyserial` and com0com. The bridge makes BLE look like a
+  USB cable, so **both CHIRP and the Radtel CPS** work through it.
 
 Both speak the same protocol to the radio. They only differ in how the bytes get
 there.
