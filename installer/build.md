@@ -46,6 +46,12 @@ download link at that release asset.
 
 * The installer requires **admin** (com0com installs a kernel driver; Python is
   all-users).
+* **Non-intrusive to existing Python.** It installs Python 3.10 **only if a
+  working 3.10 isn't already present** (checked via `py -3.10`), uses **no
+  `PrependPath`** (your PATH / default `python` is untouched), and pip-installs
+  `bleak`/`pyserial` **without `--upgrade`** (already-present copies keep their
+  version). Other Python versions are in separate folders and are never touched.
+  Everything reaches 3.10 through the `py -3.10` / `pyw -3.10` launcher.
 * com0com is only installed if it isn't already present, and the COM10↔COM11 pair
   is created only on that fresh install — re-running the installer won't stack
   duplicate pairs. A user who already has com0com keeps their existing pairs; they
