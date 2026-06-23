@@ -2,162 +2,93 @@
   <img src="assets/logo.png" alt="RT-950 Pro" width="320">
 </p>
 
-# Radtel RT-950 Pro CHIRP driver (Bluetooth)
+# Radtel RT-950 Pro — Bluetooth bridge for CHIRP and the Radtel CPS
 
-A [CHIRP](https://chirpmyradio.com/) driver that reads and writes the Radtel
-RT-950 Pro over Bluetooth, so you can program the radio without a USB cable.
-It also ships a Bluetooth bridge (and a one-click GUI / installer) so the
-**official Radtel BT-RT950PRO CPS** can program the radio over Bluetooth too.
+Program the **Radtel RT-950 Pro** over **Bluetooth** instead of a USB cable —
+from **CHIRP** *or* the **official Radtel BT-RT950PRO CPS**.
 
-I wrote the Bluetooth side of this. It builds on the USB-cable driver by Nathan
-Barguss (2E0NBS) for the radio's memory format:
-<https://github.com/NathanBarguss/Chirp_Radtel-RT-950-Pro>.
+I wrote the Bluetooth side. It builds on the USB-cable memory format by Nathan
+Barguss (2E0NBS): <https://github.com/NathanBarguss/Chirp_Radtel-RT-950-Pro>.
 
-Heads up, this is experimental. Writing to a radio can mis-program it, so always
-do a Download first and keep that `.img` as a backup before you upload anything.
-No warranty, use at your own risk.
+> ⚠️ Experimental. Writing can mis-program the radio. Always **Download first**
+> and keep that `.img` as a backup. No warranty — use at your own risk.
 
-## Easy install (recommended)
+## Pick your path
 
-Download **`RT950-Setup.exe`** from the
-[latest release](https://github.com/nivingoonesekera/Chirp_BLE_Radtel-RT-950-Pro/releases)
-and run it. It installs everything for you in one go:
+```mermaid
+flowchart TD
+    A[What do you want to use?] --> B{Just CHIRP, simplest?}
+    B -- Yes --> C[radtel_rt950pro_BLE_int.py<br/>connects over BLE itself, NO bridge<br/>pick the radio from a list]
+    B -- No --> D{Need the Radtel CPS,<br/>or CHIRP via a cable-like bridge?}
+    D -- Yes --> E[Run the bridge GUI or CLI<br/>+ com0com v2.2.2 port pair<br/>CHIRP loads radtel_rt950pro_BL.py]
+    D -- "Don't want to fiddle" --> F[RT950-Setup.exe<br/>installs Python + packages + all files]
+```
 
-* Python 3.10 (with the `py` launcher),
-* the `bleak` + `pyserial` packages,
-* com0com and a ready-made COM10 ↔ COM11 virtual pair (for the bridge path),
-* the drivers, the bridge, and the GUI — with a Start-menu/desktop **RT-950 Pro
-  Bridge** shortcut.
+## What's in the download
 
-The **RT-950 Pro Bridge** GUI it installs works with **both CHIRP and the
-official Radtel BT-RT950PRO CPS**: start the bridge, then point either program at
-the bridge's COM port. (If you only ever use the CPS, this `.exe`/GUI is the path
-to use — the direct CHIRP driver below is a CHIRP module the CPS can't load.)
+| File | What it is |
+|---|---|
+| **`radtel_rt950pro_BLE_int.py`** | Integrated BLE driver — **no bridge**. Load it in CHIRP, pick the radio from a list, Download/Upload. **CHIRP only. Easiest path.** |
+| **`radtel_rt950pro_BL.py`** | The CHIRP module to **Load Module** when you use the bridge. |
+| **`ble_bridge.py`** | The **CLI bridge**. Makes Bluetooth look like a serial cable, so **CHIRP and the CPS** both work through it. Needs `bleak` + `pyserial`. |
+| **`bridge_gui.py`** | The **GUI** version of `ble_bridge.py` — same job, with Start/Stop buttons and a device scanner. |
+| **`RT950-Setup.exe`** | One-click installer: sets up Python 3.10 + `bleak`/`pyserial` and drops the files above on your PC. **Does not install com0com** (see below). |
 
-It needs admin (com0com installs a driver) and an internet connection during
-install. The only thing it does *not* install is CHIRP itself — grab that from
-<https://chirpmyradio.com/> and turn on `Help > Enable Developer Functions`.
-(The CPS is a separate download from Radtel.)
+Grab `RT950-Setup.exe` from the
+[latest release](https://github.com/nivingoonesekera/Radtel-RT-950Pro-BLE-bridge-for-CHIRP-and-CPS/releases).
 
-Prefer to set it up by hand, or not on Windows? Follow the manual steps below.
+## Easiest way (CHIRP, no bridge)
 
-## Two ways to use it
+1. Install **Python 3.10** from <https://www.python.org/downloads/> (keep the
+   *py launcher* ticked), then run `pip install bleak`.
+2. In CHIRP, enable `Help > Enable Developer Functions`.
+3. `Radio > Load Module` → **`radtel_rt950pro_BLE_int.py`**.
+4. `Radio > Download From Radio` → pick any COM port (it's ignored) → choose your
+   radio from the list that pops up. Edit, then `Upload To Radio`.
 
-Which one you can use depends on the software:
+Radio on, Bluetooth on, **not** connected to the phone app (so it can advertise).
+It must be **Python 3.10** — CHIRP's build is 3.10 and `bleak`'s compiled parts
+have to match. Skip the scan with `set RT950_BLE_ADDR=AA:BB:CC:DD:EE:FF`.
 
-* **CHIRP** — either way below works.
-* **Official Radtel CPS** — you must use the **bridge** (or the GUI / the
-  `.exe`). The direct driver is a CHIRP module, so the CPS can't load it.
+## Bridge way (the Radtel CPS, or CHIRP via a bridge)
 
-Most people on CHIRP should use the direct Bluetooth driver:
+You need a **virtual COM-port pair**. Install **com0com v2.2.2** — **not v3**,
+which is unreliable on Windows 11 (the "fixes" you'll find online for v3 on Win11
+are hit-and-miss). We deliberately leave com0com out of the installer so you put
+on a version that works:
 
-* **`radtel_rt950pro_BLE_int.py`** connects straight to the radio over Bluetooth
-  and lets you pick it from a list. Needs Python 3.10 and `bleak`, nothing else.
-  **CHIRP only.**
+> **com0com v2.2.2 (signed):**
+> <https://sourceforge.net/projects/com0com/files/com0com/2.2.2.0/com0com-2.2.2.0-x64-fre-signed.zip>
 
-If you would rather use a bridge, want to watch the live Bluetooth traffic, or
-want to run the **official Radtel CPS**:
+Then:
 
-* **`radtel_rt950pro_BL.py`** plus **`ble_bridge.py`** (or `bridge_gui.py`) needs
-  Python 3.10, `bleak`, `pyserial` and com0com. The bridge makes BLE look like a
-  USB cable, so **both CHIRP and the Radtel CPS** work through it.
-
-Both speak the same protocol to the radio. They only differ in how the bytes get
-there.
-
-## Setup (once)
-
-1. Turn the radio on, turn Bluetooth on, and make sure it is not connected to
-   the Radtel phone app (it has to be free to advertise).
-2. Install Python 3.10 from <https://www.python.org/downloads/> (leave the
-   "py launcher" option ticked in the installer).
-3. In a terminal, run `pip install bleak`.
-4. Use a CHIRP with developer mode: the bundled `chirp-next` build, or run CHIRP
-   with `--developer`.
-
-It has to be Python 3.10, because the CHIRP build is Python 3.10 and `bleak`'s
-compiled parts have to match it. If you run CHIRP from your own Python that
-already has `bleak`, it just uses that.
-
-## Direct Bluetooth (recommended)
-
-1. In CHIRP, turn on `Help > Enable Developer Functions`.
-2. `Radio > Load Module` and choose `radtel_rt950pro_BLE_int.py`.
-3. `Radio > Download From Radio`.
-   * Model: Radtel RT-950 Pro.
-   * Port: pick any COM port in the list, it is ignored.
-   * A window pops up listing nearby Bluetooth devices, with the RT-950 at the
-     top. Pick it and click OK.
-4. Make your changes, then `Radio > Upload To Radio` to write them back.
-
-Tips:
-
-* To skip the scan, set your radio's MAC first:
-  `set RT950_BLE_ADDR=AA:BB:CC:DD:EE:FF`
-* If `bleak` is not found automatically, point at it:
-  `set RT950_BLEAK_SITE=C:\Path\To\Python310\Lib\site-packages`
-
-## Bridge with com0com (CHIRP *and* the Radtel CPS)
-
-Use this if the direct way will not run on your PC, you want the bridge's live
-frame log, or you want to use the **official Radtel BT-RT950PRO CPS** software
-over Bluetooth. The bridge makes BLE look like a plain USB cable, so any COM-port
-app — CHIRP or the CPS — works through it unchanged.
-
-One time:
-
-1. Install [com0com](https://com0com.sourceforge.net/) and make a linked pair,
-   for example COM10 and COM11.
+1. Make a pair of **two unused** COM ports (e.g. COM10 ↔ COM11) — com0com's Setup
+   app (*Add Pair*, rename them) or `setupc install PortName=COM10 PortName=COM11`.
 2. `pip install bleak pyserial`.
+3. Start the bridge on **one** port — GUI: run `python bridge_gui.py`, pick the
+   radio + that port, **Start**. CLI: `python ble_bridge.py COM10 --addr <MAC>`
+   (wait for `unlock sent; bridge live`).
+4. Point the **other** port at your program:
+   * **CHIRP** → `Load Module` `radtel_rt950pro_BL.py`, port = the other port.
+   * **Radtel CPS** → select the other port in its dialog.
 
-The easy way — GUI:
+   The bridge runs on **one** end, CHIRP/CPS on the **other** end — never the same
+   port, and never a port something else is using.
 
-1. Run `python bridge_gui.py`. It scans for your radio (with a signal meter),
-   lists COM ports, and has Start/Stop buttons — no flags to type.
-2. Pick your radio and the bridge's COM port (e.g. COM10), press **Start Bridge**.
-3. Point CHIRP or the CPS at the *other* side of the pair (COM11), then
-   Download/Upload as usual.
-
-The command-line way:
-
-1. Start the bridge and leave it running (use your radio's MAC):
-   `python ble_bridge.py COM10 --addr AA:BB:CC:DD:EE:FF`
-   Wait for `unlock sent; bridge live`.
-2. In CHIRP (developer mode) `Load Module > radtel_rt950pro_BL.py`, or open the
-   CPS.
-3. Download or Upload, model Radtel RT-950 Pro, port COM11 (the other side of
-   the pair).
-4. Press Ctrl+C in the bridge window (or Stop in the GUI) when you are done.
-
-Note: boot-logo upload is **not** supported over Bluetooth — use the USB cable
-for that.
+Boot-logo upload isn't supported over Bluetooth — use the USB cable for that.
 
 ## If something goes wrong
 
-* "Could not import bleak": install Python 3.10 and run `pip install bleak`,
-  then reload the module. If it still cannot find it, set `RT950_BLEAK_SITE`
-  (see above).
-* Empty device list, or "No RT-950 Pro found": check the radio is on, Bluetooth
-  is on, and it is not connected to the phone app. Toggle the radio's Bluetooth
-  and try again.
-* Turned the radio off and on and it will not reconnect: just retry the download
-  or upload, the driver rescans and tries the unlock again.
-* A clone fails halfway: just retry. Keep your backup `.img` handy in case a
-  write goes wrong.
+* *"Could not import bleak"* → install Python **3.10** + `pip install bleak`. If
+  still not found, set `RT950_BLEAK_SITE` to your `...\Python310\Lib\site-packages`.
+* *Empty device list / not found* → radio on, Bluetooth on, not paired to the phone.
+* *Bridge "live" but CHIRP/CPS can't open the port* → you're on the wrong end of
+  the pair, or the ports aren't a real com0com pair. Confirm the pair, run the
+  bridge on one and the app on the other.
+* *A clone fails halfway* → just retry; keep your backup `.img`.
 
-## How it works (short version)
+## Credits & licence
 
-The radio uses a HM-10 style Bluetooth service `ffe0`. `ffe1` is the data pipe
-that carries the whole clone protocol, and `ff31` takes a one-time unlock at
-connect (the radio stays silent until it gets it). The driver sends the unlock,
-then reads and writes the 33,152-byte image in blocks. APRS uses read `0x54`
-and write `0x58`.
-
-## Credits and licence
-
-* Bluetooth version by Nivin Goonesekera (VK3NWG).
-* Original USB-cable driver by Nathan Barguss (2E0NBS):
-  <https://github.com/NathanBarguss/Chirp_Radtel-RT-950-Pro>.
-* Built on the open-source CHIRP project.
-
-MIT licence, see [LICENSE](LICENSE).
+Bluetooth version by **Nivin Goonesekera (VK3NWG)**. Memory format from Nathan
+Barguss (2E0NBS). Built on the open-source [CHIRP](https://chirpmyradio.com/)
+project. MIT licence — see [LICENSE](LICENSE).

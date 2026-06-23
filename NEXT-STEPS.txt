@@ -1,0 +1,49 @@
+RT-950 Pro BLE — next steps
+===========================
+
+The installer set up Python, the drivers, the bridge, and the GUI. To finish,
+do the two things below.
+
+
+1) INSTALL A VIRTUAL COM-PORT BRIDGE (com0com v2.2.2 — NOT v3)
+--------------------------------------------------------------
+The bridge makes Bluetooth look like a serial cable so CHIRP and the Radtel CPS
+can talk to the radio. It needs a pair of linked virtual COM ports.
+
+We did NOT install com0com for you on purpose: the current com0com v3 is
+unreliable on Windows 11. Install the older, working v2.2.2 instead:
+
+  https://sourceforge.net/projects/com0com/files/com0com/2.2.2.0/com0com-2.2.2.0-x64-fre-signed.zip
+
+Setup (GUI): open com0com's "Setup" app, click "Add Pair", then rename the two
+ports to two numbers nothing else is using, e.g. COM10 and COM11.
+Setup (CLI): run, as admin,
+  setupc install PortName=COM10 PortName=COM11
+
+Rule of thumb: run the RT-950 Pro Bridge on ONE port (e.g. COM10) and point
+CHIRP or the CPS at the OTHER port (e.g. COM11). Never point both at the same
+port. Use ports that no other device or app is using.
+
+
+2) INSTALL CHIRP (only if you want to use CHIRP)
+------------------------------------------------
+Download CHIRP from https://chirpmyradio.com/ and turn on
+  Help > Enable Developer Functions
+Then Radio > Load Module and pick:
+  - radtel_rt950pro_BLE_int.py  -> connects to the radio directly, NO bridge
+                                   needed (CHIRP only). Easiest.
+  - radtel_rt950pro_BL.py       -> used together with the bridge above.
+
+The Radtel BT-RT950PRO CPS is a separate download from Radtel; it always uses
+the bridge (point it at the other COM port of your pair).
+
+
+MESSAGES YOU MIGHT SEE DURING INSTALL (all normal)
+--------------------------------------------------
+- Windows SmartScreen warns about the .exe (it's unsigned): More info -> Run anyway.
+- A Python step finishing with code 3010 just means "reboot pending" — fine.
+- If the package step fails, you were probably offline: re-run with internet on.
+
+
+Before you upload to the radio: always Download first and keep that .img as a
+backup. Writing can mis-program the radio. No warranty — use at your own risk.
